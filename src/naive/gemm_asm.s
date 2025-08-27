@@ -22,16 +22,42 @@ outer_loop:
     movq    $0, -64(%rbp)  # Loop counter set to 0.
 middle_loop:
     movq    -64(%rbp), %rax
-    cmpq    -24(%rbp), %rax
+    cmpq    -24(%rbp), %rax # k
     jae     outer_increment
 
-    movq    %0, -72(%rbp)  # Loop counter set to 0.
+    movq    $0, -72(%rbp)  # Loop counter set to 0.
 inner_loop:
     movq    -72(%rbp), %rax
     cmpq    -16(%rbp), %rax
     jae     middle_increment
 
+    movq    -32(%rbp), %rax # A
+    movq    -56(%rbp), %rcx # outer index
+    imulq   -16(%rbp), %rcx # mult by `n`.
+    addq    -72(%rbp), %rcx # add inner loop.
+    movsd   (%rax,%rcx,8), %xmm0    # Get that element ready to multiply.
 
+    movq    -40(%rbp), %rax # B
+    movq    -72(%rbp), %rcx # inner index
+    imulq   -24(%rbp), %rcx # mult by `k`.
+    addq    -64(%rbp), %rcx # add middle loop.
+    movsd   (%rax,%rcx,8), %xmm2    # Get that element ready to multiply.
+
+    movq    -48(%rbp), %rax # C
+    movq    -56(%rbp), %rcx # outer loop.
+    imulq   -24(%rbp), %rcx # mult by `k`.
+    addq    -64(%rbp), %rcx # add middle loop.
+    movsd   (%rax,%rcx,8), %xmm1    # Get that element ready to add.
+
+    mulsd   %xmm2, %xmm0
+    addsd   %xmm1, %xmm0
+    movsd   %xmm0, (%rax,%rcx,8)
+
+inner_increment:
+    movq    -72(%rbp), %rax
+    addq    $1, %rax
+    movq    %rax, -72(%rbp)
+    jmp     inner_loop
 
 middle_increment:
     movq    -64(%rbp), %rax

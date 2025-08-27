@@ -13,6 +13,9 @@ $(TARGET): $(OBJECTS)
 %.o: %.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
+%.o: %.s
+	$(CC) -c -o $@ $<
+
 assembly: gemm_naive.s
 
 gemm_naive.s: gemm_naive.c

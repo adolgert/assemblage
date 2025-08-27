@@ -13,10 +13,19 @@ $(TARGET): $(OBJECTS)
 %.o: %.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
-assembly: gemm_naive.s
+%.o: %.s
+	$(CC) -c -o $@ $<
+
+assembly: gemm_naive.s gemm_arm.s gemm_risc.s
 
 gemm_naive.s: gemm_naive.c
 	$(CC) $(CFLAGS) -S -o $@ $<
+
+gemm_arm.s: gemm_naive.c
+	$(CC) --target=aarch64-linux-gnu --sysroot=/usr/aarch64-linux-gnu -O0 -g -S -o $@ $<
+
+gemm_risc.s: gemm_naive.c
+	$(CC) --target=riscv64-linux-gnu --sysroot=/usr/riscv64-linux-gnu -O0 -g -S -o $@ $<
 
 llvm-ir: gemm_naive.ll gemm_naive-opt.ll gemm_naive-unopt.ll
 

@@ -5,7 +5,7 @@ TARGET = gemm_naive
 SOURCES = main.c gemm_naive.c
 OBJECTS = $(SOURCES:.c=.o)
 
-all: $(TARGET) assembly llvm-ir
+all: $(TARGET) assembly llvm-ir machine-ir
 
 $(TARGET): $(OBJECTS)
 	$(CC) $(CFLAGS) -o $@ $(OBJECTS)
@@ -41,10 +41,24 @@ gemm_naive-opt.ll: gemm_naive.c
 gemm_naive.ll: gemm_naive.c
 	$(CC) -S -emit-llvm $(CFLAGS) -o $@ $<
 
+machine-ir: gemm_naive.mir gemm_naive-opt.mir gemm_naive-unopt.mir
+
+# Unoptimized Machine IR (depends on unoptimized LLVM IR)
+gemm_naive-unopt.mir: gemm_naive-unopt.ll
+	llc -stop-after=finalize-isel -o $@ $<
+
+# Optimized Machine IR (depends on optimized LLVM IR)
+gemm_naive-opt.mir: gemm_naive-opt.ll
+	llc -stop-after=finalize-isel -o $@ $<
+
+# Default Machine IR (depends on default LLVM IR)
+gemm_naive.mir: gemm_naive.ll
+	llc -stop-after=finalize-isel -o $@ $<
+
 run: $(TARGET)
 	./$(TARGET)
 
 clean:
-	rm -f $(OBJECTS) $(TARGET) *.s *.ll
+	rm -f $(OBJECTS) $(TARGET) *.s *.ll *.mir
 
-.PHONY: all assembly llvm-ir run clean
+.PHONY: all assembly llvm-ir machine-ir run clean

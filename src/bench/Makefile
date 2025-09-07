@@ -18,8 +18,10 @@ $(TARGET): $(OBJECTS)
 
 assembly: dependent.s
 
+# this prints the number of consecutive calls in the assembly.
 dependent.s: dependent.c
 	$(CC) $(CFLAGS) -S -o $@ $<
+	@python3 strip.py dependent.s | uniq -c | awk '$$1 >= 100 && /imull/' || true
 
 llvm-ir: dependent.ll
 

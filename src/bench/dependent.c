@@ -194,17 +194,18 @@ void check_msr_frequency(int cpu_id)
    Use register ints which say they are in eax and ecx.
    Experiment with -O0, -O1, -O2. Here O1 did better.
 */
-void longadd(int x, int y, unsigned long long *duration, long long* ns)
+void longmul(int x, int y, unsigned long long *duration, long long* ns)
 {
     struct timespec start, end;
     unsigned long long timing = 0;
 
     // Comparing clock_gettime with rdtsc will always tell you the base
-    // frequency, which is 3.688 for this CPU.
+    // frequency, which is 3.68 for this CPU.
     clock_gettime(CLOCK_MONOTONIC, &start);
+    // Putting variables into registers helps compiler stop copying from parameters.
     register int dest asm("eax") = x;
     register int src asm("ecx") = y;
-    MULTIPLY1000(dest, src);
+    MULTIPLY1000(dest, src); // warm-up
     timing = rdtsc();
     MULTIPLY10000(dest, src);
     timing = rdtsc() - timing;
@@ -216,7 +217,16 @@ void longadd(int x, int y, unsigned long long *duration, long long* ns)
 
 // # cpu family 25, model 33.
 // # AMD Ryzen 9 5900X 12-Core Processor
-// # 550 MHz when idle. Base freq 3.688 GHz, 
+// # 550 MHz when idle. Base freq 3.68 GHz,
+// $ ./dependent
+// pinned to 23
+// Frequencies base=0 max=0, ref=0
+// Time: 24420
+// 7271 ns
+// Cycles per ns 3.358548 (this number will be wrong by a bit).
+// Frequences start 4331434 midpoint 4550001 end 4549957
+// pipeline depth 3.003001
+
 int main()
 {
     unsigned long long timing;
@@ -225,6 +235,7 @@ int main()
     unsigned int base, max, ref;
     unsigned int start_freq, mid_freq, end_freq;
     int cpu_id, asroot;
+    double cycles_per_mul;
 
     asroot = (geteuid() == 0);
     cpu_id = pin_thread();
@@ -232,14 +243,16 @@ int main()
     start_freq = get_current_frequency(cpu_id);
     get_frequencies(&base, &max, &ref);
     printf("Frequencies base=%u max=%u, ref=%u\n", base, max, ref);
+    // Warm up the grill.
     for (int burn_idx=0; burn_idx < 1000000; burn_idx++) {
-        longadd(42, 3, &timing, &nanoseconds);
+        longmul(42, 3, &timing, &nanoseconds);
     }
     mid_freq = get_current_frequency(cpu_id);
     for (int burn_idx=0; burn_idx < 1000000; burn_idx++) {
-        longadd(42, 3, &timing, &nanoseconds);
+        longmul(42, 3, &timing, &nanoseconds);
     }
-    longadd(42, 3, &timing, &nanoseconds);
+    // Now measure.
+    longmul(42, 3, &timing, &nanoseconds);
     if (asroot) {
         check_msr_frequency(cpu_id);
     }
@@ -250,5 +263,11 @@ int main()
     printf("%llu ns\n", nanoseconds);
     printf("Cycles per ns %f\n", cycles_per_ns);
     printf("Frequences start %u midpoint %u end %u\n", start_freq, mid_freq, end_freq);
+
+    cycles_per_mul = timing;
+    cycles_per_mul *= mid_freq; // Core frequency in a hot loop.
+    cycles_per_mul /= 3700000.0; // Base frequency should be 3.7 GHz
+    cycles_per_mul /= 10000.0; // Doing 10,000 imuls in the loop.
+    printf("pipeline depth %f\n", cycles_per_mul);
     return 0;
 }

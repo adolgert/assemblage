@@ -1,3 +1,5 @@
+#define _GNU_SOURCE
+#include <sched.h>
 #include <stdio.h>
 #include <time.h>
 
@@ -37,6 +39,25 @@ void get_frequencies(unsigned int *base, unsigned int *maximum, unsigned int *bu
     *base &= 0xFFFF;
     *maximum &= 0xFFFF;
     *bus_reference &= 0xFFFF;
+}
+
+void pin_thread(void)
+{
+    int current_cpu = sched_getcpu();
+    if (current_cpu == -1)
+    {
+        perror("sched_getcpu failed");
+        return;
+    }
+
+    cpu_set_t cpuset;
+    CPU_ZERO(&cpuset);
+    CPU_SET(current_cpu, &cpuset);
+
+    if (sched_setaffinity(0, sizeof(cpuset), &cpuset) == -1)
+    {
+        perror("sched_setaffinity failed");
+    }
 }
 
 #define MULTIPLY(dest, src) \
@@ -95,7 +116,14 @@ void get_frequencies(unsigned int *base, unsigned int *maximum, unsigned int *bu
     MULTIPLY1000(x, y) \
     MULTIPLY1000(x, y)
 
-unsigned long long longadd(int x)
+/*
+   Keys to making this work: ensure x and y are both arguments, not constants
+   in the function, because the compiler will always use a constant value in
+   the assembly instead of a variable.
+   Use register ints which say they are in eax and ecx.
+   Experiment with -O0, -O1, -O2. Here O1 did better.
+*/
+void longadd(int x, int y, unsigned long long *duration, long long* ns)
 {
     struct timespec start, end;
     unsigned long long timing = 0;
@@ -103,27 +131,34 @@ unsigned long long longadd(int x)
     clock_gettime(CLOCK_MONOTONIC, &start);
     timing = rdtsc();
     register int dest asm("eax") = x;
-    register int src asm("ecx") = 3;
+    register int src asm("ecx") = y;
     MULTIPLY10000(dest, src);
     timing = rdtsc() - timing;
     clock_gettime(CLOCK_MONOTONIC, &end);
-    long microseconds = (end.tv_sec - start.tv_sec) * 1000000 + (end.tv_nsec - start.tv_nsec) / 1000;
-    long long nanoseconds = (end.tv_sec - start.tv_sec) * 1000000000LL + (end.tv_nsec - start.tv_nsec);
-    printf("%llu ns\n", nanoseconds);
-    printf("%lu ms\n", microseconds);
-    return timing;
+    // long microseconds = (end.tv_sec - start.tv_sec) * 1000000 + (end.tv_nsec - start.tv_nsec) / 1000;
+    *ns = (end.tv_sec - start.tv_sec) * 1000000000LL + (end.tv_nsec - start.tv_nsec);
+    *duration = timing;
 }
 
-# cpu family 25, model 33.
-# AMD Ryzen 9 5900X 12-Core Processor
-# 550 MHz
+// # cpu family 25, model 33.
+// # AMD Ryzen 9 5900X 12-Core Processor
+// # 550 MHz
 int main(int argc, char** argv)
 {
     unsigned long long timing;
+    long long nanoseconds;
+    double cycles_per_ns;
     unsigned int base, max, ref;
     get_frequencies(&base, &max, &ref);
     printf("Frequencies base=%u max=%u, ref=%u\n", base, max, ref);
-    timing = longadd(42);
+    for (int burn_idx=0; burn_idx < 10000000; burn_idx++) {
+        longadd(42, 3, &timing, &nanoseconds);
+    }
+    longadd(42, 3, &timing, &nanoseconds);
+    cycles_per_ns = timing;
+    cycles_per_ns /= nanoseconds;
     printf("Time: %llu\n", timing);
+    printf("%llu ns\n", nanoseconds);
+    printf("Cycles per ns %f\n", cycles_per_ns);
     return 0;
 }

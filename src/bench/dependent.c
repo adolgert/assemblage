@@ -1,10 +1,14 @@
 #define _GNU_SOURCE
 #include <fcntl.h>
+#include <math.h>
 #include <sched.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <time.h>
 #include <unistd.h>
-#include <stdint.h>
+
+#include "simple_unroll.h"
+#include <immintrin.h>
 
 unsigned long long rdtsc()
 {
@@ -187,6 +191,28 @@ void check_msr_frequency(int cpu_id)
     MULTIPLY1000(x, y) \
     MULTIPLY1000(x, y)
 
+
+void warm_up(int x, int y)
+{
+    struct timespec start, end;
+    int warm_idx = 0;
+    register int dest asm("eax") = x;
+    register int src asm("ecx") = y;
+
+    // Comparing clock_gettime with rdtsc will always tell you the base
+    // frequency, which is 3.68 for this CPU.
+    clock_gettime(CLOCK_MONOTONIC, &start);
+    // warm-up for the core. This can take a few milliseconds.
+    // 5e-3 s x 3.7 x 10^9 cycles/s = 1.85e7 cycles.
+    // That's 6e6 iterations of a 3-clock loop.
+    for (warm_idx = 0; warm_idx < 80000; warm_idx++) {
+        MULTIPLY1000(dest, src); // warm-up
+    }
+    clock_gettime(CLOCK_MONOTONIC, &end);
+    long microseconds = (end.tv_sec - start.tv_sec) * 1000000 + (end.tv_nsec - start.tv_nsec) / 1000;
+    printf("warm-up microseconds %ld\n", microseconds);
+}
+
 /*
    Keys to making this work: ensure x and y are both arguments, not constants
    in the function, because the compiler will always use a constant value in
@@ -194,24 +220,98 @@ void check_msr_frequency(int cpu_id)
    Use register ints which say they are in eax and ecx.
    Experiment with -O0, -O1, -O2. Here O1 did better.
 */
-void longmul(int x, int y, unsigned long long *duration, long long* ns)
+// AVX2 vectorized multiplication function
+void longmul_avx2(int x, int y)
+{
+    const int N = 1024 * 1024 * 8; // Process 8192 elements (1024 AVX2 vectors of 8 ints)
+
+    // Align arrays for AVX2
+    int* __restrict__ a = (int*)_mm_malloc(N * sizeof(int), 32);
+    int* __restrict__ b = (int*)_mm_malloc(N * sizeof(int), 32);
+    int* __restrict__ result = (int*)_mm_malloc(N * sizeof(int), 32);
+
+    // Initialize arrays
+    for (int i = 0; i < N; i++) {
+        a[i] = x;
+        b[i] = y;
+    }
+
+
+    // Hot vectorizable loop - compiler will auto-vectorize this to AVX2
+    #ifdef __clang__
+    #pragma clang loop vectorize(enable) interleave(enable)
+    #else
+    #pragma GCC ivdep
+    #pragma GCC vector
+    #endif
+    for (int i = 0; i < N; i++) {
+        result[i] = a[i] * b[i];
+    }
+
+    // Prevent optimization away
+    volatile int sink = result[N-1];
+    (void)sink;
+
+    _mm_free(a);
+    _mm_free(b);
+    _mm_free(result);
+}
+
+// Explicit AVX2 implementation for comparison
+void longmul_explicit_avx2(int x, int y, unsigned long long *duration, long long* ns)
 {
     struct timespec start, end;
+    unsigned long long timing = 0;
+    const int N = 1024 * 8; // 8192 elements
+
+    int* __restrict__ a = (int*)_mm_malloc(N * sizeof(int), 32);
+    int* __restrict__ b = (int*)_mm_malloc(N * sizeof(int), 32);
+    int* __restrict__ result = (int*)_mm_malloc(N * sizeof(int), 32);
+
+    // Initialize arrays with values
+    for (int i = 0; i < N; i++) {
+        a[i] = x;
+        b[i] = y;
+    }
+
+    clock_gettime(CLOCK_MONOTONIC, &start);
+    timing = rdtsc();
+
+    // Explicit AVX2 loop
+    for (int i = 0; i < N; i += 8) {
+        __m256i va = _mm256_load_si256((__m256i*)&a[i]);
+        __m256i vb = _mm256_load_si256((__m256i*)&b[i]);
+        __m256i vr = _mm256_mullo_epi32(va, vb);
+        _mm256_store_si256((__m256i*)&result[i], vr);
+    }
+
+    timing = rdtsc() - timing;
+    clock_gettime(CLOCK_MONOTONIC, &end);
+
+    volatile int sink = result[N-1];
+    (void)sink;
+
+    _mm_free(a);
+    _mm_free(b);
+    _mm_free(result);
+
+    *ns = (end.tv_sec - start.tv_sec) * 1000000000LL + (end.tv_nsec - start.tv_nsec);
+    *duration = timing;
+}
+
+void longmul(int x, int y, unsigned long long *duration)
+{
     unsigned long long timing = 0;
 
     // Comparing clock_gettime with rdtsc will always tell you the base
     // frequency, which is 3.68 for this CPU.
-    clock_gettime(CLOCK_MONOTONIC, &start);
     // Putting variables into registers helps compiler stop copying from parameters.
     register int dest asm("eax") = x;
     register int src asm("ecx") = y;
-    MULTIPLY1000(dest, src); // warm-up
     timing = rdtsc();
+    // UNROLL_8192(MULTIPLY, dest, src);
     MULTIPLY10000(dest, src);
     timing = rdtsc() - timing;
-    clock_gettime(CLOCK_MONOTONIC, &end);
-    // long microseconds = (end.tv_sec - start.tv_sec) * 1000000 + (end.tv_nsec - start.tv_nsec) / 1000;
-    *ns = (end.tv_sec - start.tv_sec) * 1000000000LL + (end.tv_nsec - start.tv_nsec);
     *duration = timing;
 }
 
@@ -229,45 +329,66 @@ void longmul(int x, int y, unsigned long long *duration, long long* ns)
 
 int main()
 {
-    unsigned long long timing;
-    long long nanoseconds;
-    double cycles_per_ns;
+    unsigned long long timing, min_timing;
     unsigned int base, max, ref;
-    unsigned int start_freq, mid_freq, end_freq;
+    unsigned int start_freq, mid_freq, end_freq, trial_freq;
     int cpu_id, asroot;
     double cycles_per_mul;
+    int warm_idx;
+    int N=10000;
 
+    // Use taskset -c 3 to start this. That's the best core.
     asroot = (geteuid() == 0);
     cpu_id = pin_thread();
     printf("pinned to %d\n", cpu_id);
     start_freq = get_current_frequency(cpu_id);
     get_frequencies(&base, &max, &ref);
     printf("Frequencies base=%u max=%u, ref=%u\n", base, max, ref);
-    // Warm up the grill.
-    for (int burn_idx=0; burn_idx < 1000000; burn_idx++) {
-        longmul(42, 3, &timing, &nanoseconds);
-    }
-    mid_freq = get_current_frequency(cpu_id);
-    for (int burn_idx=0; burn_idx < 1000000; burn_idx++) {
-        longmul(42, 3, &timing, &nanoseconds);
-    }
-    // Now measure.
-    longmul(42, 3, &timing, &nanoseconds);
     if (asroot) {
         check_msr_frequency(cpu_id);
     }
-    end_freq = get_current_frequency(cpu_id);
-    cycles_per_ns = timing;
-    cycles_per_ns /= nanoseconds;
-    printf("Time: %llu\n", timing);
-    printf("%llu ns\n", nanoseconds);
-    printf("Cycles per ns %f\n", cycles_per_ns);
-    printf("Frequences start %u midpoint %u end %u\n", start_freq, mid_freq, end_freq);
+    trial_freq = start_freq;
+    longmul(42, 3, &min_timing);
 
-    cycles_per_mul = timing;
-    cycles_per_mul *= mid_freq; // Core frequency in a hot loop.
-    cycles_per_mul /= 3700000.0; // Base frequency should be 3.7 GHz
-    cycles_per_mul /= 10000.0; // Doing 10,000 imuls in the loop.
+    for (warm_idx=0; warm_idx<10; warm_idx++)
+    {
+        for (int inner_idx=0; inner_idx < 20; inner_idx++)
+        {
+            longmul_avx2(3, 7);
+        }
+        longmul(42, 3, &timing);
+        if (timing < min_timing)
+        {
+            min_timing = timing;
+        }
+        mid_freq = get_current_frequency(cpu_id);
+        printf("frequency %d %u\n", warm_idx, mid_freq);
+        if (mid_freq > trial_freq)
+        {
+            trial_freq = mid_freq;
+        }
+    }
+    mid_freq = trial_freq;
+    printf("Time: %llu\n", min_timing);
+    end_freq = get_current_frequency(cpu_id);
+    // The frequencies measured by the operating system are estimates over a time,
+    // and are imprecise, but we know the CPU is always at a particular multiplier.
+    printf("Frequences start %u midpoint %u end %u\n", start_freq, mid_freq, end_freq);
+    // Frequencies of the CPU come in multipliers, where a multiplier is incremented
+    // 0.25 at a time. For this CPU, it starts at 3.7 GHz with a multiplier of 37.
+    // We will therefore guess that the correct multiplier is the closest one to the 0.25.
+    double hot_multiplier = 0.25 * round(4.0 * (mid_freq / 100000.0));
+    double base_multiplier = 37.0;
+    printf("base multiplier %f hot multiplier %f\n", base_multiplier, hot_multiplier);
+    cycles_per_mul = min_timing;
+    cycles_per_mul /= ((double) N); // Doing 10,000 imuls in the loop.
+    cycles_per_mul *= hot_multiplier / base_multiplier;
+    // cycles_per_mul *= mid_freq; // Core frequency in a hot loop.
+    // cycles_per_mul /= 3700000.0; // Base frequency should be 3.7 GHz
     printf("pipeline depth %f\n", cycles_per_mul);
+
+    int expected_cycles = N * 3;
+    double cycles_taken = round(min_timing * hot_multiplier / base_multiplier);
+    printf("should take %d did take %f\n", expected_cycles, cycles_taken);
     return 0;
 }

@@ -1,5 +1,6 @@
 CC = clang
-CFLAGS = -Wall -Wextra -O2 -g
+CFLAGS = -Wall -Wextra -O2 -mavx2 -march=native -ftree-vectorize
+LIBS = -lm
 
 TARGET = dependent
 SOURCES = dependent.c
@@ -8,7 +9,7 @@ OBJECTS = $(SOURCES:.c=.o)
 all: $(TARGET) assembly llvm-ir
 
 $(TARGET): $(OBJECTS)
-	$(CC) $(CFLAGS) -o $@ $(OBJECTS)
+	$(CC) $(CFLAGS) -o $@ $(OBJECTS) $(LIBS)
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c -o $@ $<
@@ -33,4 +34,7 @@ dependent.ll: dependent.c
 clean:
 	rm -f $(OBJECTS) $(TARGET) *.s *.ll
 
-.PHONY: all assembly llvm-ir run clean
+run:
+	taskset -c 3 ./dependent
+
+.PHONY: all assembly llvm-ir run clean run
